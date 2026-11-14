@@ -39,7 +39,8 @@ QRect monitorRegion(HMONITOR monitor) {
 // highlights, so it is the fallback rather than the primary path, but it keeps
 // working where a duplicated surface is blank.
 QImage readDesktopRegion(const QRect &nativeRegion) {
-    if (nativeRegion.isEmpty()) return {};
+    if (nativeRegion.isEmpty() || qint64(nativeRegion.width()) * nativeRegion.height() > MaxPixels)
+        return {};
     HDC screen = GetDC(nullptr);
     HDC memory = screen ? CreateCompatibleDC(screen) : nullptr;
     BITMAPINFO info{};
@@ -72,6 +73,24 @@ QImage readDesktopRegion(const QRect &nativeRegion) {
     return image;
 }
 
+QImage readSdrScreen(QImage image, const QRect &nativeRegion) {
+    if (nativeRegion.isEmpty()) return {};
+    // Qt's grab can fail independently on one output or return logical-sized
+    // pixels after a DPI/topology change. Never stretch that image over a 4K
+    // monitor and then label it as native pixels.
+    image = image.convertToFormat(QImage::Format_RGB32);
+    if (image.size() == nativeRegion.size() && !windowscapture::isBlankFrame(image))
+        return image;
+    diagnostics::write(diagnostics::Level::Warning, "capture",
+        "SDR desktop read was empty, blank or changed size; retrying native GDI region",
+        {{"width", nativeRegion.width()}, {"height", nativeRegion.height()},
+         {"x", nativeRegion.x()}, {"y", nativeRegion.y()}});
+    DwmFlush();
+    // A successful GDI read may legitimately be all black (for example a black
+    // wallpaper). A null read is a failure, not a successful black screenshot.
+    return readDesktopRegion(nativeRegion);
+}
+
 QImage readHdrScreen(HMONITOR monitor, float whiteLevel, QRect *geometry = nullptr) {
     std::unique_ptr<windowscapture::DesktopCapture> temporary;
     auto &capture = scrollingCaptureActive ? scrollingHdrScreens[monitor] : temporary;
@@ -87,7 +106,11 @@ QImage readHdrScreen(HMONITOR monitor, float whiteLevel, QRect *geometry = nullp
         diagnostics::write(diagnostics::Level::Warning, "capture",
             "Advanced-color screen capture failed", {{"detail", error}});
         capture.reset();
-        return image;
+        const QRect region = monitorRegion(monitor);
+        DwmFlush();
+        const auto fallback = readDesktopRegion(region);
+        if (!fallback.isNull() && geometry) *geometry = region;
+        return fallback;
     }
     if (windowscapture::isBlankFrame(image)) {
         // A new duplication can hand out one frame the compositor has not
@@ -430,6 +453,7 @@ void prepareScreenCapture(QObject *context, std::function<void()> ready, bool fr
 }
 void captureScreens(CaptureCallback callback) {
     QVector<ScreenFrame> frames;
+    QStringList unavailable;
     for (QScreen *screen : QGuiApplication::screens()) {
         QRect native;
         HMONITOR monitor = nullptr;
@@ -444,12 +468,14 @@ void captureScreens(CaptureCallback callback) {
         }
         const auto color = windowscapture::displayColor(monitor);
         QImage image = color.advancedColor ? readHdrScreen(monitor, color.sdrWhiteLevel) :
-                                            screen->grabWindow(0).toImage();
-        if (image.isNull()) {
-            if (color.advancedColor) {
-                callback({}, tr("无法读取屏幕画面"));
-                return;
-            }
+                                            readSdrScreen(screen->grabWindow(0).toImage(), native);
+        if (!image.isNull() && image.size() != native.size())
+            image = readDesktopRegion(native);
+        if (image.isNull() || native.isEmpty()) {
+            unavailable.append(screen->name());
+            diagnostics::write(diagnostics::Level::Warning, "capture",
+                "Screen capture unavailable", {{"screen", screen->name()},
+                 {"width", native.width()}, {"height", native.height()}});
             continue;
         }
         image.setDevicePixelRatio(1);
@@ -501,7 +527,13 @@ void captureScreens(CaptureCallback callback) {
         },reinterpret_cast<LPARAM>(&data));
         frames.append(frame);
     }
-    callback(frames, frames.isEmpty() ? tr("无法读取屏幕画面") : QString());
+    callback(frames, frames.isEmpty() ? tr("无法读取屏幕画面") :
+        unavailable.isEmpty() ? QString() : tr("以下屏幕暂时无法读取：%1。其他屏幕仍可截图。")
+                                              .arg(unavailable.join("、")));
+}
+void moveCapturePointer(const ScreenFrame &frame, QPoint pixel) {
+    const QPoint native = frame.nativeGeometry.topLeft() + pixel;
+    SetCursorPos(native.x(), native.y());
 }
 QVector<Candidate> nativeElementsAt(QPoint point, qint64 excludedPid) {
     struct Search {

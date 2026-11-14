@@ -3,16 +3,29 @@
 #include "platform.h"
 #include "windowscapture.h"
 #include <QApplication>
+#include <QColorSpace>
 #include <QScreen>
 #include <QTest>
+#include <algorithm>
 
 namespace captureFallbackTest {
 QImage frame;
 QRect geometry(0, 0, 32, 16);
 int gdiReads = 0;
+bool gdiAvailable = false;
+QRect gdiRegion;
 HDC unavailableDesktopDc(HWND) {
     ++gdiReads;
-    return nullptr;
+    return gdiAvailable ? ::GetDC(nullptr) : nullptr;
+}
+BOOL readTestDesktop(HDC target, int, int, int width, int height, HDC, int x, int y, DWORD) {
+    gdiRegion = {x, y, width, height};
+    DIBSECTION dib{};
+    if (!GetObjectW(GetCurrentObject(target, OBJ_BITMAP), sizeof(dib), &dib) || !dib.dsBm.bmBits)
+        return FALSE;
+    auto *pixels = static_cast<QRgb *>(dib.dsBm.bmBits);
+    std::fill_n(pixels, width * height, qRgb(31, 35, 40));
+    return TRUE;
 }
 }
 
@@ -37,7 +50,9 @@ DisplayColor fallbackDisplayColor(HMONITOR) { return {true, 1}; }
 #define DesktopCapture FallbackDesktopCapture
 #define displayColor fallbackDisplayColor
 #define GetDC captureFallbackTest::unavailableDesktopDc
+#define BitBlt captureFallbackTest::readTestDesktop
 #include "../app/platform_win.cpp"
+#undef BitBlt
 #undef GetDC
 #undef displayColor
 #undef DesktopCapture
@@ -63,6 +78,8 @@ class WindowsCaptureFallbackTests final : public QObject {
         captureFallbackTest::frame = QImage(captureFallbackTest::geometry.size(), QImage::Format_RGB32);
         captureFallbackTest::frame.fill(Qt::black);
         captureFallbackTest::gdiReads = 0;
+        captureFallbackTest::gdiAvailable = false;
+        captureFallbackTest::gdiRegion = {};
     }
     void cleanup() { h2d::endScrollingCapture(); }
 
@@ -77,6 +94,52 @@ class WindowsCaptureFallbackTests final : public QObject {
     void blankHdrAndFailedGdiReturnNoImage() {
         const auto image = h2d::readHdrScreen(monitor_, 1);
         QVERIFY2(image.isNull(), "A failed fallback must not return the known blank HDR frame.");
+        QCOMPARE(captureFallbackTest::gdiReads, 1);
+    }
+    void nullHdrAlsoAttemptsGdiBeforeReportingFailure() {
+        captureFallbackTest::frame = {};
+        QVERIFY(h2d::readHdrScreen(monitor_, 1).isNull());
+        QCOMPARE(captureFallbackTest::gdiReads, 1);
+    }
+    void sdrNativePixelsRemainUnscaledAndOpaque() {
+        QImage image(3840, 2160, QImage::Format_ARGB32);
+        image.fill(QColor(31, 35, 40, 0));
+        const QRect monitor(-3840, -200, 3840, 2160);
+        const auto result = h2d::readSdrScreen(image, monitor);
+        QCOMPARE(result.size(), monitor.size());
+        QCOMPARE(result.pixelColor(100, 100), QColor(31, 35, 40));
+        QCOMPARE(captureFallbackTest::gdiReads, 0);
+    }
+    void sdrFallbackReadsPhysicalMonitorGeometry_data() {
+        QTest::addColumn<QRect>("region");
+        QTest::newRow("4k-left-of-primary") << QRect(-3840, 0, 3840, 2160);
+        QTest::newRow("4k-above-primary") << QRect(0, -2160, 3840, 2160);
+        QTest::newRow("portrait-right-of-primary") << QRect(2560, -200, 1440, 2560);
+    }
+    void sdrFallbackReadsPhysicalMonitorGeometry() {
+        QFETCH(QRect, region);
+        captureFallbackTest::gdiAvailable = true;
+        const auto result = h2d::readSdrScreen({}, region);
+        QCOMPARE(result.size(), region.size());
+        QCOMPARE(captureFallbackTest::gdiRegion, region);
+        QCOMPARE(result.pixelColor(result.width() - 1, result.height() - 1), QColor(31, 35, 40));
+        QCOMPARE(result.colorSpace(), QColorSpace(QColorSpace::SRgb));
+        QCOMPARE(captureFallbackTest::gdiReads, 1);
+    }
+    void unavailableSdrFramesNeverBecomeNativeScreens_data() {
+        QTest::addColumn<int>("kind");
+        QTest::newRow("null") << 0;
+        QTest::newRow("black") << 1;
+        QTest::newRow("logical-sized-after-dpi-change") << 2;
+    }
+    void unavailableSdrFramesNeverBecomeNativeScreens() {
+        QFETCH(int, kind);
+        QImage image;
+        if (kind) {
+            image = QImage(kind == 1 ? QSize(3840, 2160) : QSize(1920, 1080), QImage::Format_RGB32);
+            image.fill(kind == 1 ? Qt::black : Qt::white);
+        }
+        QVERIFY(h2d::readSdrScreen(image, {-3840, 0, 3840, 2160}).isNull());
         QCOMPARE(captureFallbackTest::gdiReads, 1);
     }
     void ordinaryCaptureReportsFailedFallback() {

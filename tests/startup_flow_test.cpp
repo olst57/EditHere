@@ -332,6 +332,40 @@ class StartupFlowTests : public QObject {
         QVERIFY(editor->document().dirty);
         editor->hide();
     }
+    void choosingUpdateSourceSavesWithoutApplyingOrSavingTheSettingsDraft() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("settings.ini");
+        const auto settings = quietSettings();
+        QVERIFY(saveSettings(settings, nullptr, path));
+        Controller controller(nullptr, settings, path);
+        bool changed = false;
+        QTimer::singleShot(0, [&] {
+            auto dialog = qobject_cast<SettingsDialog *>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            auto capture = dialog->findChild<QCheckBox *>("captureOnStartup");
+            QVERIFY(capture);
+            capture->setChecked(!settings.captureOnStartup);
+            auto source = dialog->findChild<QComboBox *>("updateSource");
+            QVERIFY(source);
+            source->setCurrentIndex(source->findData("atomgit"));
+            const auto saved = loadSettings(path);
+            QCOMPARE(saved.updateSource, QString("atomgit"));
+            QCOMPARE(saved.captureOnStartup, settings.captureOnStartup);
+            changed = true;
+            dialog->reject();
+        });
+        controller.openSettings();
+        QVERIFY(changed);
+        QCOMPARE(loadSettings(path).updateSource, QString("atomgit"));
+        QTimer::singleShot(0, [&] {
+            auto dialog = qobject_cast<SettingsDialog *>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            QCOMPARE(dialog->findChild<QComboBox *>("updateSource")->currentData().toString(), QString("atomgit"));
+            dialog->reject();
+        });
+        controller.openSettings();
+        editorOf(controller)->hide();
+    }
     void magnifierRemainsVisibleWithoutDelay() {
         ScreenFrame frame;
         frame.image=QImage(800,600,QImage::Format_RGB32);
