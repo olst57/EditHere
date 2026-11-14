@@ -95,6 +95,12 @@ class SettingsTests : public QObject {
             QCOMPARE(loadSettings(path).updateSource, QString(source));
             SettingsDialog dialog(loadSettings(path));
             QCOMPARE(dialog.findChild<QComboBox *>("updateSource")->currentData().toString(), QString(source));
+            if (QString(source) == "atomgit" && !qEnvironmentVariableIsEmpty("H2D_TEST_ARTIFACTS")) {
+                dialog.showUpdates();
+                dialog.show();
+                QTest::qWait(30);
+                artifact(dialog, "saved-update-source.png");
+            }
         }
         QSettings malformed(path, QSettings::IniFormat);
         malformed.setValue("updates/source", "https://untrusted.example");

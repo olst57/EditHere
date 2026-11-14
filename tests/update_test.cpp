@@ -206,7 +206,7 @@ class UpdateTests : public QObject {
         object["release_status"] = "latest";
         const auto result = UpdateChecker::parseRelease(QJsonDocument(object).toJson(), "0.13.2", UpdateChecker::AtomGit);
         QCOMPARE(result.status, UpdateChecker::Available);
-        QCOMPARE(result.url, QUrl("https://atomgit.com/Inginnng/EditHere/releases/tag/v0.13.3"));
+        QCOMPARE(result.url, QUrl("https://atomgit.com/Inginnng/EditHere/releases/v0.13.3"));
         const QString base = "https://api.atomgit.com/api/v5/repos/Inginnng/EditHere/releases/v0.13.3/attach_files/";
         QCOMPARE(result.installer.url, QUrl(base + "EditHere-win-x64-setup.exe/download"));
         QCOMPARE(result.installerHash.url, QUrl(base + "EditHere-win-x64-setup.exe.sha256/download"));
@@ -1006,7 +1006,7 @@ class UpdateTests : public QObject {
     }
     void liveReleaseCheck() {
         if (!qEnvironmentVariableIsSet("H2D_LIVE_UPDATES"))
-            QSKIP("Opt-in real GitHub+Gitee release integration check");
+            QSKIP("Opt-in real GitHub+Gitee+AtomGit release integration check");
         UpdateChecker checker;
         QSignalSpy result(&checker, &UpdateChecker::finished);
         checker.check();
@@ -1016,13 +1016,12 @@ class UpdateTests : public QObject {
         QVERIFY(!checker.busy());
         qInfo().noquote() << result.first()[1].toString();
         QVERIFY(result.first()[0].value<UpdateChecker::Status>() != UpdateChecker::Failed);
-        for (const auto source : {UpdateChecker::GitHub, UpdateChecker::Gitee}) {
-            const QString sourceName = source == UpdateChecker::GitHub ? "GitHub" : "Gitee";
+        for (const auto source : {UpdateChecker::GitHub, UpdateChecker::Gitee, UpdateChecker::AtomGit}) {
+            const auto sourceName = UpdateChecker::sourceName(source);
             const auto &sourceResult = UpdateCheckerTestAccess::sourceResult(checker, source);
             QVERIFY2(sourceResult.has_value(), qPrintable(sourceName + " did not complete before the deadline"));
             QVERIFY2(sourceResult->status != UpdateChecker::Failed, qPrintable(sourceResult->message));
-            QCOMPARE(sourceResult->url.host(), source == UpdateChecker::GitHub
-                         ? QString("github.com") : QString("gitee.com"));
+            QCOMPARE(sourceResult->url.host(), UpdateChecker::releasesUrl(source).host());
             qInfo().noquote() << sourceName << sourceResult->tagName << sourceResult->url.host();
         }
     }

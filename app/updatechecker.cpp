@@ -115,7 +115,7 @@ UpdateChecker::Result UpdateChecker::parseRelease(const QByteArray &bytes, const
     const auto localMatch = versionPattern.match(currentVersion);
     // Gitee's latest-release API omits draft and html_url. Build its public
     // release page from the fixed repository and the validated version tag.
-    const QUrl expectedUrl(releasesUrl(source).toString() + "/tag/" + tag);
+    const QUrl expectedUrl(releasesUrl(source).toString() + (source == AtomGit ? "/" : "/tag/") + tag);
     const QUrl url(source != GitHub && !object.contains("html_url")
                        ? expectedUrl : QUrl(object.value("html_url").toString()));
     const bool invalidDraft = source == GitHub ? !object.value("draft").isBool() || object.value("draft").toBool()
